@@ -5,8 +5,9 @@ date: "2023-08-25"
 output: html_document
 ---
 
-```{r setup, include=FALSE}
+```{r setup, include=FALSE, knitr root.dir = "~/GitHub/baseball-projects/Baseball-Projects/Lahman-Career-WAR-Predictions" }
 knitr::opts_chunk$set(echo = TRUE)
+
 ```
 
 
@@ -31,10 +32,6 @@ library(pdp)
 library(readxl)
 ```
 
-```{r Set Working Directory}
-setwd("Baseball-Projects/Lahman_Career_War_Predictions")
-```
-
 
 Read in the files from your working directory
 
@@ -46,4 +43,338 @@ org_ranking <- read_xlsx("historic_prospect_ranking_with_Lahman_ID.xlsx")
 
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+```{r Initial Data Manipulation}
+#Filter for years 1994 and beyond but still hold the original tables for reference
+batting <- org_batting %>% filter(yearID >= 1994)
+appearance <- org_appearance %>% filter(yearID >= 1994)
+people <- org_people %>% filter(finalGame >= 1994)
+
+#Rename some columns in the ranking table and remove players who did not make the big leagues
+ranking <- org_ranking %>% rename(playerID=lahman_id)
+ranking <- na.omit(ranking) #Remove ranked players that never made the big leagues
+```
+
+
+
+
+```{r}
+#Acquire a player's best ranking ever earned. This will be our basis for their minor league performance evaluation
+best_rank <- ranking %>% 
+  group_by(playerID) %>% 
+  summarise(best_ranking=min(prospect_rank)) %>%
+  left_join(ranking,by="playerID") %>% 
+  filter(best_ranking==prospect_rank) %>%
+  rename(best_ranked_year=year) %>%
+  arrange(playerID,desc(best_ranked_year)) %>%
+  subset(!duplicated(playerID))
+
+#Adding plate appearances, average, singles, slugging, on-base %, and OPS
+batting <- batting %>% 
+  mutate(PA=(AB+BB+HBP+SF+SH+IBB),                      #PA Calculation
+         AVG=(H/AB),                                    #AVG Calculation
+         X1B=(H-(X2B+X3B+HR)),                          #Singles Calculation
+         SB_perc=ifelse((SB+CS)==0,0,SB/(SB+CS)),       #Stolen Base Percentage Calculation (This will be 0 if never attempted) 
+         eligible=T,                                    #Indicator of whether they are age 31 (Will be changed later based on each row)
+         ID=paste(playerID,yearID,teamID,sep = " ")) %>%#ID to merge data frames         
+  filter(PA != 0) %>%                                   #Removing all occurrences of no plate appearances
+  mutate(SLG=((X1B+(2*X2B)+(3*X3B)+(4*HR))/AB ),        #Slugging Percentage Calculation
+         OBP=((H+BB+HBP+IBB)/PA),                       #On-Base Percentage Calculation
+         BABIP=ifelse((AB-HR-SO+SF)==0,0,((H-HR)/(AB-HR-SO+SF)))) %>%          #Batting Average on Balls in Play Calc
+  mutate(AVG=ifelse(AVG=="NaN",0,AVG),                                         #Change NaN to 0 since they had no at-bats
+         SLG=ifelse(SLG=="NaN",0,SLG),
+         OBP=ifelse(OBP=="NaN",0,OBP)) %>%
+  mutate(OPS=(SLG+OBP)) %>%                                                    #OPS Calculation
+  left_join(best_rank, by = "playerID")                                        #Merge the prospect rankings with the batting table
+
+```
+
+```{r}
+###CALCULATING LEAGUE AVERAGE OPS BASED ON AMERICAN LEAGUE###
+league_average_ops <- batting %>%
+  na.omit() %>%                  #Remove the NA cases
+  filter(lgID=="AL") %>%         #Only use American League per request
+  dplyr::select(yearID,OPS) %>%  #Take the two columns we care about
+  group_by(yearID) %>%           #Group the years together
+  summarize_all(mean) %>%        #Get the average
+  rename(avg_OPS=OPS)
+
+#TIE THE LEAGUE AVERAGE OPS BACK IN TO GET THE OFFENSIVE RAA VALUE###
+batting <- batting %>%
+  left_join(league_average_ops, by = "yearID") %>%
+  mutate(o_raa_total=(PA * (OPS - avg_OPS) /3.2135))
+
+```
+
+```{r}
+#Loop to bin the rankings into 16 different categories of unranked, 1, 2, 3, 4, 5, 6-10, then by 10's from 11-20 to 91-100
+for(i in 1:nrow(batting)){
+  if (is.na(batting$best_ranking[i])){        #If their best ranking is NA, 
+    batting$best_ranking[i] <- "Never Ranked" #they were never ranked
+  }else if (batting$best_ranking[i] == 1){    #If it is 1, 
+    batting$best_ranking[i] <- "1"            #their best ranking was "1"
+  }else if (batting$best_ranking[i] == 2){    #and so on.
+    batting$best_ranking[i] <- "2"
+  }else if (batting$best_ranking[i] == 3){
+    batting$best_ranking[i] <- "3"
+  }else if (batting$best_ranking[i] == 4){
+    batting$best_ranking[i] <- "4"
+  }else if (batting$best_ranking[i] == 5){
+    batting$best_ranking[i] <- "5"
+  }else if (batting$best_ranking[i] <= 10){  #To condense bins, 6-10 is matched up
+    batting$best_ranking[i] <- "6-10"
+  }else if (batting$best_ranking[i] <= 20){  #The rest will be done by 10's
+    batting$best_ranking[i] <- "11-20"
+  }else if (batting$best_ranking[i] <= 30){
+    batting$best_ranking[i] <- "21-30"
+  }else if (batting$best_ranking[i] <= 40){
+    batting$best_ranking[i] <- "31-40"
+  }else if (batting$best_ranking[i] <= 50){
+    batting$best_ranking[i] <- "41-50"
+  }else if (batting$best_ranking[i] <= 60){
+    batting$best_ranking[i] <- "51-60"
+  }else if (batting$best_ranking[i] <= 70){
+    batting$best_ranking[i] <- "61-70"
+  }else if (batting$best_ranking[i] <= 80){
+    batting$best_ranking[i] <- "71-80"
+  }else if (batting$best_ranking[i] <= 90){
+    batting$best_ranking[i] <- "81-90"
+  }else {
+    batting$best_ranking[i] <- "91-100"
+  }
+}
+
+```
+
+```{r}
+##GET ALL THE POSITION PLAYERS (Accounting for some pitching appearances in blowouts/two-way players)###
+appearance <- appearance %>% 
+  mutate(G_field = (G_c+G_1b+G_2b+G_3b+G_ss+G_of+G_dh)) %>% #All non-pitching games played
+  filter(G_p == 0 | G_field >= 10) %>%                      #A player who hasn't pitched or appears in 10 or more games in the field is included
+  filter(G_field != 0) %>%                                  #Remove players who have only been pinch hitters or pinch runners
+  mutate(raa_c=(G_c/G_field)*(9/150)*GS,                    #Calculate the defensive RAA for each position
+         raa_1b=(G_1b/G_field)*(-9.5/150)*GS,               #G_field is used instead of G_defense to include the DH while still removing games appeared as a pitcher, pinch hitter, or pinch runner 
+         raa_2b=(G_2b/G_field)*(3/150)*GS,
+         raa_3b=(G_3b/G_field)*(2/150)*GS,
+         raa_ss=(G_ss/G_field)*(7/150)*GS,
+         raa_lf=(G_lf/G_field)*(-7/150)*GS,
+         raa_cf=(G_cf/G_field)*(2.5/150)*GS,
+         raa_rf=(G_rf/G_field)*(-7/150)*GS,
+         raa_dh=(G_dh/G_field)*(-15/150)*GS) %>%
+  mutate(d_raa_total=(raa_c+raa_1b+raa_2b+raa_3b+raa_ss+raa_lf+raa_cf+raa_rf+raa_dh)) %>%
+  mutate(ID=paste(playerID,yearID,teamID,sep = " ")) %>%          #ID to match the players to the batting table
+  dplyr::select(-c(yearID,teamID,lgID,playerID))           #Remove columns that will overlap with the batting table when joined
+
+```
+
+```{r Add in birthdates}
+###BRING IN BIRTHDATES TO SEE WHO IS OVER 31###
+batting <- batting %>% 
+  left_join(people, by="playerID") %>%
+  mutate(age=ifelse(birthMonth>=7,yearID-birthYear-1,yearID-birthYear)) %>% #Get their age for the season
+  mutate(eligible=ifelse(age < 31, T, F)) #If they are 30 or less for the season, they are included
+   
+```
+
+```{r Combine the appearances and batting tables}
+total <- batting %>%
+  right_join(appearance,by="ID") %>%           #For each person's 
+  filter(eligible==T) %>%
+  mutate(RAR=(o_raa_total+d_raa_total+20)) %>%
+  mutate(WAR=ifelse(RAR<0,0,RAR/10),
+         ID=paste(ID,stint)) %>%
+  unique()
+```
+
+```{r Remove players without WAR}
+###REMOVE CASES WITHOUT A WAR VALUE THEN SUM THEM###
+total <- total[complete.cases(total$WAR),]
+WAR_total <- total %>%
+  group_by(playerID) %>%
+  dplyr::select(playerID,WAR) %>%
+  summarize_all(sum) %>%
+  rename(WAR_pre31=WAR) #Get the sum of the season WAR values
+#Combine the tables
+total <- total %>%
+  left_join(WAR_total,by="playerID")
+```
+
+```{r Player WAR remaining before 30 Calculation}
+#Loop to calculate the players remaining WAR until age 30 inclusive of the current season
+total <- total %>% arrange(playerID,yearID)      #Sort by each player
+total$years_left <- 0                            #Set their remaining years in the league after the current season pre-31 to 0
+total$remainingWAR <- 0                          #Set their remaining pre-31 WAR to 0
+for (i in 1:(nrow(total)-5)){                    #For each case (through the penultimate playerID to avoid an error)
+  k=i                                            #placeholder of index
+  while(total$playerID[i]==total$playerID[k+1]){ #While we are still on the same player... 
+    total$years_left[i] <- (k+1)-i                   #Their years left is however many rows that player has
+    k <- k + 1
+  }
+  j=1
+  for(j in 0:total$years_left[i]){
+    total$remainingWAR[i] <- total$remainingWAR[i]+total$WAR[i+j]
+  }
+}
+#The last player needs to be hard coded since there is no row after him
+for (i in (nrow(total)-5):nrow(total)){
+  total$years_left[i] <- nrow(total)-i
+  j=1
+  for(j in 0:total$years_left[i]){
+    total$remainingWAR[i] <- total$remainingWAR[i]+total$WAR[i+j]
+  }
+}
+
+total$previous_accurred_WAR <- ifelse(total$WAR_pre31-total$remainingWAR < 0.0000001,0,total$WAR_pre31-total$remainingWAR)
+total$remainingWAR <- total$remainingWAR-total$WAR
+
+```
+
+```{r}
+###REMOVE VARIABLES THAT ARE REPETITIVE, HAVE TOO MANY LEVELS, OR ARE UNUSEFUL###
+#The reason why years left is not useful is we don't know how many years they have left for a current player
+total <- total %>%
+  dplyr::select(-c(eligible,birthCity,deathCountry,deathState,deathCity,deathYear,deathMonth,deathDay,nameFirst,nameLast,nameGiven,retroID,bbrefID,prospect_rank,team_abbr,first_name,last_name,mlbam_id,position,avg_OPS,o_raa_total,years_left)) %>%
+  mutate(debut=as.numeric(as.Date(debut)-8766),         #Convert dates to days since 1994
+         finalGame=as.numeric(as.Date(finalGame))-8766,
+         PA_per_GS=(PA/G_field)*GS,                     #Additional rate statistics based on PA & Games played
+         HR_per_PA=ifelse(PA==0,0,HR/PA),
+         X2B_per_PA=ifelse(PA==0,0,X2B/PA),
+         X3B_per_PA=ifelse(PA==0,0,X3B/PA),
+         RBI_per_PA=ifelse(PA==0,0,RBI/PA),
+         SB_per_H=ifelse(H==0,0,SB/H),
+         CS_per_H=ifelse(H==0,0,CS/H),
+         SO_per_PA=ifelse(PA==0,100,SO/PA),
+         BB_per_PA=ifelse(PA==0,0,BB/PA))
+
+#(Optional) Add variables if the player is still likely active or if they could have more unaccounted for WAR 
+total <- total %>% mutate(More_WAR_after_dataset=ifelse(finalGame>(as.numeric(as.Date("2017-08-01"))-8766) & age < 30, T, F),
+                          Previous_WAR_before_dataset=ifelse(debut<0,T,F))
+
+```
+
+```{r}
+#Find how long after their best prospect ranking it took for the player to debut
+for(i in 1:nrow(total)){
+  if(is.na(total$best_ranked_year[i])){
+    total$best_ranked_year[i] <- 10000000  #A big number is used to differentiate between unranked and ranked players
+  }
+  else{
+    total$best_ranked_year[i] <- as.numeric(as.Date(paste0(as.character(total$best_ranked_year[i]),"-01-01")))-8766
+  }
+}
+total$best_rank_debut_diff <- total$debut-total$best_ranked_year
+
+```
+
+```{r}
+#Loop to bin how long prior to a player's debut their best ranking was
+for(i in 1:nrow(total)){
+  if(total$best_rank_debut_diff[i] < -100000){
+    total$years_before_debut_best_rank[i] <- "Never Ranked"
+  } else if(total$best_rank_debut_diff[i] < 0){
+    total$years_before_debut_best_rank[i] <- "Highest Rank occurred after debut"
+  } else if(total$best_rank_debut_diff[i] < 365){
+    total$years_before_debut_best_rank[i] <- "Highest Rank 1 year before debut"
+  } else if(total$best_rank_debut_diff[i] < 730){
+    total$years_before_debut_best_rank[i] <- "Highest Rank 2 years before debut"
+  } else if(total$best_rank_debut_diff[i] < 1095){
+    total$years_before_debut_best_rank[i] <- "Highest Rank 3 years before debut"
+  } else {
+    total$years_before_debut_best_rank[i] <- "Highest Rank 4 or more years before debut"
+  }
+}
+#Convert it to a categorical variable
+total$years_before_debut_best_rank <- factor(total$years_before_debut_best_rank)
+
+```
+
+```{r}
+#Calculate the player's primary position that season
+catch_col <- which(colnames(total)=="G_c") #Get the column number for Games played at catcher
+total$primary_pos <- factor(max.col(total[,c(catch_col:(catch_col+7),catch_col+9)],ties.method = "first")+1) #Check the maximum Games Played of the next 9 columns except for G_of
+
+#Remove some columns that could be considered redundant and would cause multicollinearity
+#This line must be run as these variables are too indicative of a players WAR and the year/date should not be a factor for a generalizable model
+total <- total %>% dplyr::select(-c(yearID,birthYear,raa_c,raa_1b,raa_2b,raa_3b,raa_ss,raa_lf,raa_cf,raa_rf,RAR,debut,finalGame,raa_dh,d_raa_total,best_ranked_year,best_rank_debut_diff,WAR_pre31,playerID))
+#This can be technically commented out if doing non-parametric tests
+total <- total %>% dplyr::select(-c(PA,H,AB,birthState,OPS,X1B,G_p,G_c,G_1b,G_2b,G_3b,G_ss,G_lf,G_cf,G_rf,G_all,GS,G_field,G_dh,G_of,G_batting,G_defense,G_ph,G_pr,)) #PA, AB, and all the Game variables need to be removed since it is too highly correlated with PA/GS
+
+
+#Option to convert string to factor if not done prior (Should not be done with ID still in total)
+###CONVERT ALL REMAINING STRING VARIABLES TO CATEGORICAL###
+#total <- as.data.frame(unclass(total),          
+#                       stringsAsFactors = TRUE)
+```
+
+
+```{r}
+#Remove players age 30 seasons as there is nothing to predict for those cases
+#This is done now and not earlier as we need the age 30 season for their WAR before age 31
+predictors <- total %>% 
+  filter(age < 30) %>%
+  filter(More_WAR_after_dataset == F) %>%
+  dplyr::select(-c(More_WAR_after_dataset)) %>%
+  mutate(birthCountry=ifelse(birthCountry=="P.R."|birthCountry=="Guam"|birthCountry=="V.I.","US_Territory",birthCountry)) %>%
+  mutate(birthCountry=ifelse(birthCountry=="Nicaragua"|birthCountry=="Honduras"|birthCountry=="Panama","Central American Country",birthCountry)) %>%
+  mutate(birthCountry=ifelse(birthCountry=="Australia"|birthCountry=="South Africa"|birthCountry=="Belgium"|birthCountry=="Saudi Arabia","Other",birthCountry)) %>%
+  dplyr::select(remainingWAR, everything())
+```
+
+```{r Modeling Setup}
+###SPLIT THE DATASET FOR MODELING###
+set.seed(17) #Set a seed so the split can be replicated
+predictors <- predictors %>% mutate(id = row_number())  #Split it into 60% for training, 30% for validation, and 10% for testing (testing is never used in this analysis)
+train <- predictors %>% sample_frac(0.6)
+validation <- anti_join(predictors, train, by = 'id') 
+set.seed(17)
+test <- validation %>% sample_frac(0.25)
+validation <- anti_join(validation, test, by = 'id')
+
+#Hold the players full ID to check abnormal observations in the end
+id_num <- which(colnames(train)=="ID")
+train_id <- train[id_num]
+validation_id <- validation[id_num]
+test_id <- test[id_num]
+
+#Remove the id variable which is just the row number from each data frame
+train <- train %>% dplyr::select(-c(id,ID))          
+validation <- validation %>% dplyr::select(-c(id,ID))
+test <- test %>% dplyr::select(-c(id,ID))
+
+#Convert all the independent variables into a matrix to turn the categorical variables into dummy variables
+train_x <- model.matrix(remainingWAR ~ ., data = train)[, -1] 
+train_y <- train$remainingWAR
+validation_x <- model.matrix(remainingWAR ~ ., data = validation)[, -1]
+validation_y <- validation$remainingWAR
+test_x <- model.matrix(remainingWAR ~ ., data = test)[, -1]
+test_y <- test$remainingWAR
+```
+
+First we want to try and create an interpretable model. This 
+
+```{r Testing Multicollinearyity}
+#TESTING FOR MULTICOLLINEARITY#
+
+#Remove factors to calculate the correlation matrix
+factors <- c(  which(colnames(train)=="teamID"),
+               which(colnames(train)=="lgID"),
+               which(colnames(train)=="best_ranking"),
+               which(colnames(train)=="birthCountry"),
+               which(colnames(train)=="bats"),
+               which(colnames(train)=="throws"),
+               which(colnames(train)=="years_before_debut_best_rank"),
+               which(colnames(train)=="primary_pos")
+            )
+correlation <- cor(train[,-c(factors)])
+corrplot(correlation, type="upper", order="hclust", tl.col="black",tl.cex = 0.5)
+train_uncorr_variables <- train %>%
+  dplyr::select(-c(AVG,X2B,BB,SO,RBI,HR,R))
+validation_uncorr_variables <- validation %>%
+  dplyr::select(-c(AVG,X2B,BB,SO,RBI,HR,R))
+test_uncorr_variables <- test %>%
+  dplyr::select(-c(AVG,X2B,BB,SO,RBI,HR,R))
+
+#Can check the vifs also to evaluate multicollinearity (Will not work if row 258 is commented out)
+vif(lm(remainingWAR~.-best_ranking,data=train_uncorr_variables)) #High VIF for BABIP,each type of hit, and PA
+
+```
