@@ -1,0 +1,49 @@
+---
+title: "Lahman Career WAR Predictions"
+author: "Zach Houghtaling"
+date: "2023-08-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r Load in Libraries}
+library(tidyverse)      
+library(readxl)
+library(glmnet)   
+library(randomForest)
+library(xgboost)
+library(car)
+library(lmtest)
+library(MASS)
+library(nortest)
+library(DescTools) 
+library(e1071)
+library(caret)
+library(tictoc)
+library(rstan)
+library(corrplot)
+library(Ckmeans.1d.dp)
+library(pdp)
+library(readxl)
+```
+
+```{r Set Working Directory}
+setwd("Baseball-Projects/Lahman_Career_War_Predictions")
+```
+
+
+Read in the files from your working directory
+
+```{r Load in Data}
+org_batting <- read.csv("Batting.csv")      #Table containing hitting statistics
+org_people <- read.csv("People.csv")          #Table containing birthdays
+org_appearance <- read.csv("Appearances.csv") #Table containing games played in
+org_ranking <- read_xlsx("historic_prospect_ranking_with_Lahman_ID.xlsx")
+
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
