@@ -30,6 +30,9 @@ library(corrplot)
 library(Ckmeans.1d.dp)
 library(pdp)
 library(readxl)
+library(iml)
+library(SHAPforxgboost)
+library(keras)
 ```
 
 
@@ -376,5 +379,581 @@ test_uncorr_variables <- test %>%
 
 #Can check the vifs also to evaluate multicollinearity (Will not work if row 258 is commented out)
 vif(lm(remainingWAR~.-best_ranking,data=train_uncorr_variables)) #High VIF for BABIP,each type of hit, and PA
+
+```
+
+```{r}
+#Residual plot analysis
+#Loop to test how well each included variable predicts remaining WAR with the residual plot
+###-------
+#remainWAR_col <- which(colnames(train)=="remainingWAR")
+#for (i in c(1:(remainWAR_col-1),(remainWAR_col+1):length(train))){
+#  lm <- lm(train$remainingWAR~unlist(train[[i]]))
+#  print(summary(lm))
+#  print(ggplot(lm,aes(x=train$remainingWAR,y=rstandard(lm))) +
+#    geom_point(color="blue") +
+#    geom_line(y=-3)+
+#    geom_line(y=3)+
+#    ylim(-10,10)+
+#    labs(x="Remaining WAR",y="Residuals")+
+#    ggtitle(paste0("Residual Plot of ",colnames(train[i]))))
+#}
+###---------
+
+```
+
+```{r}
+#TESTING FOR NORMALITY#
+n.index <- seq(1,nrow(train))
+lm <- lm(remainingWAR~.,data=train)
+ggplot(lm,aes(x=n.index,y=rstudent(lm))) +
+  geom_point(color="blue") +
+  geom_line(y=-3)+
+  geom_line(y=3)+
+  ylim(-10,10)+
+  labs(x="Observation",y="Residuals")+
+  ggtitle("Studentized Residuals")
+
+ggplot(lm,aes(x=train$remainingWAR,y=rstandard(lm))) +
+  geom_point(color="blue") +
+  geom_line(y=-3)+
+  geom_line(y=3)+
+  ylim(-10,10)+
+  labs(x="Remaining WAR",y="Residuals")+
+  ggtitle("Residual Plot")
+
+```
+
+
+```{r}
+#Tests for transformations of the data
+#boxCox(lm) 
+#yjPower(lm)
+#Neither work as there is 0 as a potential outcome for WAR remaining
+
+```
+
+
+```{r}
+hist(resid(lm),xlab="Residual Value",main="Histogram of Residuals")
+qqnorm(resid(lm))
+ad.test(resid(lm))  #Test if they are normal based on empirical distribution
+
+```
+
+
+```{r}
+#Show which observation numbers have abnormally high residuals
+residuals <- as.data.frame(rstudent(lm))
+residuals <- cbind(residuals,n.index)
+residuals <- residuals %>% arrange(desc(residuals))
+head(residuals)
+
+ggplot(lm,aes(x=fitted.values(lm),y=resid(lm)))+
+  geom_point() +
+  xlab("Fitted Value") +
+  ylab("Residual Value")
+
+ggplot(lm,aes(x=remainingWAR,y=resid(lm)))+
+  geom_point() +
+  xlab("WAR Remaining Before 31") +
+  ylab("Residual")
+
+```
+
+We also need to explore influential points and outliers
+
+```{r}
+#Plot graph of influential points & outliers
+hat.val <- (2*(length(train)-1))/nrow(train) #Calculate the hat value for influential points
+ggplot(lm,aes(x=hatvalues(lm),y=rstudent(lm)))+
+  geom_point() +
+  geom_hline(yintercept=3) +       #If over 3 studentized residual, this could indicate an outlier
+  geom_vline(xintercept=hat.val) + #If over hat-value, likely influential point
+  labs(x="Hat Values",y="Residuals")
+
+hatvals <- as.data.frame(hatvalues(lm))
+hatvals <- cbind(hatvals,n.index)
+hatvals <- hatvals %>% arrange(desc(hatvals))
+head(hatvals)
+```
+
+Non-linear predictive modeling needs to be done since linear regression assumptions are violated
+
+```{r LASSO Regression}
+lasso <- glmnet(x = train_x, y = train_y, alpha = 1) #Using glmnet, LASSO has alpha of 1 (ridge is 0 and a decimal is elastic net)
+plot(lasso, xvar = "lambda")
+
+lasso_cv <- cv.glmnet(x = train_x, y = train_y, alpha = 1) #Cross validation lasso
+plot(lasso_cv)
+
+##Add in the lines for 1 standard error away from first point
+plot(lasso, xvar = "lambda")
+abline(v = log(lasso_cv$lambda.1se), col = "red", lty = "dashed")
+abline(v = log(lasso_cv$lambda.min), col = "black", lty = "dashed")
+
+#View the plot of the influential variables at 1 standard error from minimum mse
+data.frame(summary(coef(lasso, s = lasso_cv$lambda.1se))) %>% 
+  left_join((data.frame(dimnames(coef(lasso, s = lasso_cv$lambda.1se))[[1]]) %>%
+             mutate(row_num = row_number()) %>%
+               rename(row_name="dimnames.coef.lasso..s...lasso_cv.lambda.1se....1..")),
+            by=c("i"="row_num")) %>%
+  filter(row_name != "(Intercept)") %>%
+  ggplot(aes(x, reorder(row_name, x))) + #Plot the influential variables
+  geom_point() +
+  ggtitle("Influential Variables") +
+  xlab("Coefficient") +
+  ylab(NULL)
+
+
+```
+
+
+```{r Random Forest Modeling}
+set.seed(17)
+ntree=250
+rF <- randomForest(remainingWAR~.,data=train,importance=T,ntree=ntree)
+rF
+plot(rF)
+set.seed(17)
+t <- tuneRF(train_x, train_y,stepFactor = 0.5,plot = T,ntreeTry = 500,trace = T,improve = 0.05)
+hist(treesize(rF),main = "No. of Nodes for the Trees",col = "green")
+varImpPlot(rF,sort = T,n.var = 20,main = "Top 20 - Variable Importance")
+importance(rF)
+```
+
+
+```{r Initial XGBoost Modeling}
+#10 fold cross validation model testing the root mean squared error for 100 different rounds
+#Will find out which number of rounds is the best based on the testing
+set.seed(17)
+xgModel <- xgb.cv(data = train_x, label = train_y, nrounds = 100,
+                    objective = "reg:squarederror", nfold=10)
+
+#which number of rounds has the lowest test rmse
+nrounds <- which(xgModel$evaluation_log$test_rmse_mean==min(xgModel$evaluation_log$test_rmse_mean))
+
+#tuning through caret
+tune_grid <- expand.grid(
+  nrounds = nrounds,
+  eta = c(0.1, 0.15, 0.2, 0.25, 0.3),
+  max_depth = c(1:10),
+  gamma = c(0),
+  colsample_bytree = 1,
+  min_child_weight = 1,
+  subsample = c(0.25, 0.5, 0.75, 1)
+)
+
+#Only do this the first time before the best model is found (computationally intensive)
+#Find the model that is tuned with the best parameters that were chosen above to test (1 to 10 different depth levels, 5 potential eta values and 4 potential subsample values)
+#set.seed(17)
+#xgb.caret <- train(x = train_x, y = train_y,
+#                        method = "xgbTree",
+#                        tuneGrid = tune_grid,
+#                        trControl = trainControl(method = 'cv', # Using 10-fold cross-validation
+#                                                 number = 10))
+#Look for the lowest point on this graph
+#plot(xgb.caret)
+#The row with the lowest mse has eta at 0.2, max_depth at 5,and subsample at 1.
+
+set.seed(17)
+best.xgb <- xgboost(data=train_x,label=train_y,eta=0.2,nrounds = nrounds,max_depth=5,subsample=1)
+
+#Which variables were important in our best xgboost model
+set.seed(17)
+xg_important_vars <- xgb.importance(feature_names = colnames(train_x), model = best.xgb)
+xgb.ggplot.importance(xgb.importance(feature_names = colnames(train_x), model = best.xgb))
+
+```
+
+Lets add a random variable to further test the significance of the importance of the variables
+
+```{r XGboost Modeling with Random Variable Added}
+train_rand <- train
+train_rand$random <- rnorm(nrow(train_rand))
+train_x_rand <- model.matrix(remainingWAR ~ ., data = train_rand)[, -1] 
+rand.xgb <- xgboost(data=train_x_rand,label=train_y,eta=0.2,nrounds = nrounds,max_depth=5,subsample=1)
+xg_important_vars_rand <- xgb.importance(feature_names = colnames(train_x_rand), model = rand.xgb)
+xgb.ggplot.importance(xgb.importance(feature_names = colnames(train_x_rand), model = rand.xgb))
+
+#Remove all variables that are not
+xg_important_vars_above_rand <- xg_important_vars_rand[1:(which(xg_important_vars_rand$Feature=="random")-1)]
+train_xg_simple <- train %>% dplyr::select(remainingWAR,age,RBI,R,WAR,HR,PA_per_GS,best_ranking,SLG,SO_per_PA,OBP,weight,birthDay,RBI_per_PA,height,BB,years_before_debut_best_rank,BB_per_PA,HR_per_PA,previous_accurred_WAR)
+train_x_rand <- model.matrix(remainingWAR ~ ., data = train_xg_simple)[, -1] 
+
+#10 fold cross validation model testing the root mean squared error for 100 different rounds
+#Will find out which number of rounds is the best based on the testing
+set.seed(17)
+xgModel_rand <- xgb.cv(data = train_x_rand, label = train_y, nrounds = 100,
+                  objective = "reg:squarederror", nfold=10)
+
+#which number of rounds has the lowest test rmse
+nrounds_rand <- which(xgModel_rand$evaluation_log$test_rmse_mean==min(xgModel_rand$evaluation_log$test_rmse_mean))
+
+
+#Only do this the first time before the best model is found (computationally intensive)
+#Find the model that is tuned with the best parameters that were chosen above to test (1 to 10 different depth levels, 5 potential eta values and 4 potential subsample values)
+
+#tuning through caret
+tune_grid_rand <- expand.grid(
+  nrounds = nrounds_rand,
+  eta = c(0.1, 0.15, 0.2, 0.25, 0.3),
+  max_depth = c(1:10),
+  gamma = c(0),
+  colsample_bytree = 1,
+  min_child_weight = 1,
+  subsample = c(0.25, 0.5, 0.75, 1)
+)
+set.seed(17)
+#xgb.caret_rand <- train(x = train_x_rand, y = train_y,
+#                        method = "xgbTree",
+#                        tuneGrid = tune_grid_rand,
+#                        trControl = trainControl(method = 'cv', # Using 10-fold cross-validation
+#                                                 number = 10))
+#Look for the lowest point on this graph
+#plot(xgb.caret)
+#The row with the lowest mse has eta at 0.25, max_depth at 5, and subsample at 1.
+
+set.seed(17)
+best.xgb2 <- xgboost(data=train_x_rand,label=train_y,eta=0.25,nrounds = nrounds_rand,max_depth=5,subsample=1)
+
+#Which variables were important in our best xgboost model
+set.seed(17)
+xgb.importance(feature_names = colnames(train_x_rand), model = best.xgb2)
+xgb.ggplot.importance(xgb.importance(feature_names = colnames(train_x_rand), model = best.xgb2))
+
+```
+
+Compare results with the validations data set
+
+```{r}
+#Bring back in the id to find out which observations are which in determining worst cases
+train <- cbind(train_id,train)
+validation <- cbind(validation_id,validation)
+
+#Used for all R-squared calculations as the Sum of Deviance Squared
+avg <- mean(validation_y)
+dev <- validation_y - avg
+dev_sq <- sum(dev^2)
+
+```
+
+```{r}
+###LASSO model validation------
+validation$pred_lasso <- predict(lasso, s = lasso_cv$lambda.1se, newx = validation_x)
+validation$lasso_diff <- validation$remainingWAR - validation$pred_lasso
+validation_lasso <- validation %>% arrange(lasso_diff)
+
+
+#Lasso specific predictions and difference
+predictions_lasso <- predict(lasso, s = lasso_cv$lambda.1se, newx = validation_x)
+diff_lasso <- validation_y - predictions_lasso
+diff_sq_lasso <- sum(diff_lasso^2)
+
+rsq_lasso <- 1-(diff_sq_lasso/dev_sq)
+rsq_lasso #0.5105183
+#The R-squared for the training was 0.4520 and is 0.5105 for the validation set
+
+
+MAE_lasso <- mean(abs(validation$pred_lasso))
+MAE_lasso #10.63867
+
+worst_lasso <- validation_lasso %>% arrange(lasso_diff) %>% dplyr::select(c(ID,remainingWAR,pred_lasso,lasso_diff,age,WAR,previous_accurred_WAR))
+worst_lasso <- head(worst_lasso,20)
+worst_lasso
+```
+
+```{r}
+##Random Forest Model Validation------
+validation$rF_prediction <- predict(rF, newdata=validation)
+validation$rF_diff <- validation$remainingWAR - validation$rF_prediction
+validation_rF <- validation %>% arrange(rF_diff)
+
+rF_predictions <- predict(rF,newdata=validation)
+rF_diff <- validation_y - rF_predictions
+rF_diff_sq <- sum(rF_diff^2)
+
+rF_rsq <- 1-(rF_diff_sq/dev_sq)
+rF_rsq #0.5716131
+#The R-squared for the training was 0.5513 and is 0.5716 for the validation set
+
+
+MAE_rF <- mean(abs(validation$rF_prediction))
+MAE_rF #10.67763
+
+worst_rF <- validation_rF %>% arrange(rF_diff) %>% dplyr::select(c(ID,remainingWAR,rF_prediction,rF_diff,age,WAR,previous_accurred_WAR))
+worst_rF <- head(worst_rF,20)
+worst_rF
+```
+
+```{r}
+###XGBoost Model Validation----
+validation$pred_xg <- predict(best.xgb, validation_x)
+validation$xg_diff <-  validation$remainingWAR - validation$pred_xg
+validation_xg <- validation %>% arrange(xg_diff)
+
+xg_predictions <- predict(best.xgb,validation_x)
+xg_diff <- validation_y - xg_predictions
+xg_diff_sq <- sum(xg_diff^2)
+
+xg_rsq <- 1-(xg_diff_sq/dev_sq)
+xg_rsq #0.6321746
+
+MAE_xg <- mean(abs(validation$pred_xg))
+MAE_xg #10.39506
+
+worst_xg <- validation_xg %>% arrange(xg_diff)%>% dplyr::select(c(ID,remainingWAR,pred_xg,xg_diff,age,WAR,previous_accurred_WAR))
+worst_xg <- head(worst_xg,20)
+worst_xg
+
+
+validation_xg_simple <- validation %>% dplyr::select(remainingWAR,age,RBI,R,WAR,HR,PA_per_GS,best_ranking,SLG,SO_per_PA,OBP,weight,birthDay,RBI_per_PA,height,BB,years_before_debut_best_rank,BB_per_PA,HR_per_PA,previous_accurred_WAR)
+validation_x_simple <- model.matrix(remainingWAR ~ ., data = validation_xg_simple)[, -1]
+
+validation$pred_xg2 <- predict(best.xgb2, validation_x_simple)
+validation$xg_diff2 <-  validation$remainingWAR - validation$pred_xg2
+validation_xg2 <- validation %>% arrange(xg_diff2)
+
+xg_predictions2 <- predict(best.xgb2,validation_x_simple)
+xg_diff2 <- validation_y - xg_predictions2
+xg_diff_sq2 <- sum(xg_diff2^2)
+
+xg_rsq2 <- 1-(xg_diff_sq2/dev_sq)
+xg_rsq2 #0.5952848
+#If we use the second XGBoost model with less variables, we can get a similar R-squared albeit lower.
+#These are all variables that were worse than our randomly inputted variable and is simpler
+
+MAE_xg2 <- mean(abs(validation$pred_xg2))
+MAE_xg2 #10.41589
+
+worst_xg2 <- validation_xg2 %>% arrange(xg_diff2)%>% dplyr::select(c(ID,remainingWAR,pred_xg2,xg_diff2,age,WAR,previous_accurred_WAR))
+worst_xg2 <- head(worst_xg2,20)
+worst_xg2
+
+```
+
+```{r}
+#Ensemble the models together
+validation$pred_ensemble <- 0
+for(i in 1:nrow(validation)){
+  validation$pred_ensemble[i] <- (validation$pred_xg[i]+validation$rF_prediction[i]+validation$pred_lasso[i])/3
+}
+validation$ensemble_err <- validation$remainingWAR - validation$pred_ensemble
+ensemble_err_sq <- sum(validation$ensemble_err^2)
+ensemble_rsq <- 1-(ensemble_err_sq/dev_sq)
+ensemble_rsq 
+
+MAE_ensemble <- mean(abs(validation$pred_ensemble))
+MAE_ensemble
+
+validation_ensemble <- validation %>% arrange(ensemble_err)
+worst_ensemble <- validation_ensemble %>% arrange(ensemble_err)%>% dplyr::select(c(ID,remainingWAR,pred_ensemble,ensemble_err,age,WAR,previous_accurred_WAR))
+worst_ensemble <- head(worst_ensemble,20)
+worst_ensemble
+
+```
+
+```{r}
+#Make a table of all the results of the different modeling methods
+results <- NULL
+results <- rbind(results,c("LASSO",0.4848,rsq_lasso,MAE_lasso,worst_lasso$lasso_diff[1]))
+colnames(results) <- c("Modeling Method","Training R-Squared","Validation R-Squared","MAE","Worst Over Prediction Difference")
+results <- rbind(results,c("Random Forest Model",rF$rsq[250],rF_rsq,MAE_rF,worst_rF$rF_diff[1]))
+results <- rbind(results,c("XG Boost Model",0.5849,xg_rsq,MAE_xg,worst_xg$xg_diff[1]))
+results <- rbind(results,c("Simplified XG Boost Model",0.5621,xg_rsq2,MAE_xg2,worst_xg2$xg_diff2[1]))
+results <- rbind(results,c("Ensemble of All Models",NA,ensemble_rsq,MAE_ensemble,worst_ensemble$ensemble_err[1]))
+results <- as.data.frame(results)
+results$`R-Squared Difference` <- as.numeric(results$`Validation R-Squared`) - as.numeric(results$`Training R-Squared`)
+results
+
+```
+```{r XGBoost Shapley Values}
+#Shapely values from XGBoost Package
+
+xgb.plot.shap(data = as.matrix(train_x),model = best.xgb)
+xgb.plot.shap.summary(data = as.matrix(train_x),model = best.xgb)
+xgb.ggplot.shap.summary(data = as.matrix(train_x),model = best.xgb) +
+  ylab("Shapley Value") +
+  xlab("Top 10 Features") +
+  labs(color="Feature Value") +
+  scale_y_discrete(labels=c('OBP'='OBP',
+                            'RBI'='RBI',
+                            'R'='R',
+                            'WAR'='WAR',
+                            'HR'='HR',
+                            'SLG'='SLG',
+                            'age'="Age",
+                            'PA_per_GS'="PA/GS",
+                            'best_rankingNever Ranked'="Player was Never Ranked",
+                            'SO_per_PA'="SO/PA"))
+
+
+```
+
+```{r}
+# Select the observation index for which you want to compute SHAP values
+point <- 1
+
+# Create the iml Predictor object
+predictor <- Predictor$new(best.xgb, data = as.data.frame(train_x), y = train_y,
+                           predict.fun=function(model, newdata){
+                             newData_x = xgb.DMatrix(data.matrix(newdata), missing = NA)
+                             results<-predict(model, newData_x)
+                             return(results)
+                           })
+
+# Create a new data frame with the same feature names as the training data
+train_x
+data.frame(train_x[1,])
+as.matrix(newdata)
+newdata <- t(data.frame(train_x[point, ]))
+rownames(newdata) <- NULL
+newdata <- data.frame(newdata)
+colnames(newdata) <- colnames(train_x)
+
+# Create the Shapley object and compute SHAP values for the selected observation
+shapley <- Shapley$new(predictor, x.interest = data.frame(xgb.DMatrix(data.matrix(newdata))))
+
+# Plot the SHAP values for the selected observation
+shapley$plot()
+
+```
+
+
+
+```{r Support Vector Machine}
+svmfit <- svm(remainingWAR~., data=train, kernel="linear",  cost=10, scale =FALSE )
+plot(svmfit, train)  # gives SVM classification plot
+svmfit$index    # gives ix of support vectors
+summary(svmfit)
+tune.out <-tune(svm, remainingWAR~., data=train, kernel ="linear",
+              ranges=list(cost=c(0.001, 0.01, 0.1, 1, 5, 10, 100) ))
+summary(tune.out)
+##--- Extract the model with best cost
+bestmod <- tune.out$best.model
+summary(bestmod)
+tab <- table(bestmod$fitted , train$remainingWAR)
+dat.te <- data.frame(x=Khan$xtest , y=as.factor (Khan$ytest ))
+pred.te <- predict (out , newdata =dat.te)
+table(pred.te , dat.te$y)
+svmfit$index    
+## support vectors are different now
+```
+
+```{stan Bayesian Model}
+###BAYESIAN MODELING METHODS###-----------------------------
+#file <- rstan::stan('Orioles One Var Bayesian.stan')
+
+# Run the function on validation_x
+#y_pred_r <- gen_quant_r(validation_x)
+#mean(y_pred_r == validation_y)
+
+
+
+```
+
+```{r}
+library(rstanarm)
+library(bayesplot)
+
+stan_model <-stan_glm(remainingWAR~.,data=train, seed=828,refresh=0)
+summary(model1)
+
+## compare to frequentist!!
+
+model2<-lm(Sale_Price~.,data=train_reg)
+summary(model2)
+
+
+sims <- as.array(model1)
+plot_title <- ggtitle("Posterior distributions",
+                      "with medians and 95% intervals")
+mcmc_areas(sims, prob = 0.95) + plot_title
+
+
+
+sims2<-sims[,,-c(1,3,7,8)]
+plot_title <- ggtitle("Posterior distributions",
+                      "with medians and 95% intervals")
+mcmc_areas(sims2, prob = 0.95) + plot_title
+
+
+
+mcmc_areas(sims,
+           pars = c("Lot_Area"),
+           prob = 0.95) + plot_title
+
+quantile(sims[,,3], probs = c(.025,.975))
+
+color_scheme_set("mix-blue-red")
+mcmc_trace(sims, pars = c("Age", "sigma"), 
+           facet_args = list(ncol = 1, strip.position = "left"))
+
+```
+
+```{r Shapley Values}
+# To return the SHAP values and ranked features by mean|SHAP|
+var_importance_train <- NULL
+for(i in 1:nrow(train_x)){
+  shap_values <- shap.values(xgb_model = best.xgb, X_train = xgb.DMatrix(t(data.matrix(train_x[i,])), missing = NA))
+  var_importance_train <- rbind(var_importance_train,t(data.frame(shap_values$mean_shap_score)))
+  row.names(var_importance_train) <- NULL
+}
+var_importance_train <- data.frame(train_id,var_importance_train)
+
+# To return the SHAP values and ranked features by mean|SHAP|
+var_importance_valid <- NULL
+for(i in 1:nrow(validation_x)){
+  shap_values <- shap.values(xgb_model = best.xgb, X_train = xgb.DMatrix(t(data.matrix(validation_x[i,])), missing = NA))
+  var_importance_valid <- rbind(var_importance_valid,t(data.frame(shap_values$mean_shap_score)))
+  row.names(var_importance_valid) <- NULL
+}
+var_importance_valid <- data.frame(validation_id,var_importance_valid)
+
+```
+
+```{r}
+worst_cases_var_importance <- var_importance_valid %>% filter(ID %in% worst_xg$ID | ID %in% worst_ensemble$ID)
+worst_cases_var_importance
+worst_cases_average_var_importance <- data.frame(t(colMeans(worst_cases_var_importance[,2:length(worst_cases_var_importance)])))
+row.names(worst_cases_average_var_importance) <- NULL
+worst_cases_average_var_importance
+```
+
+```{r}
+# Normalize the data (optional, but recommended for neural networks)
+train_x_scaled <- scale(train_x)
+validation_x_scaled <- scale(validation_x)
+test_x_scaled <- scale(test_x)
+
+
+model <- keras_model_sequential()
+
+model %>%
+  layer_dense(units = 64, activation = 'relu', input_shape = ncol(train_x_scaled)) %>%
+  layer_dense(units = 32, activation = 'relu') %>%
+  layer_dense(units = 1)  # Output layer for regression
+
+model %>% compile(
+  loss = 'mean_squared_error',
+  optimizer = optimizer_adam()  # You can choose other optimizers as well
+)
+
+# Set up early stopping
+early_stopping <- callback_early_stopping(
+  monitor = 'val_loss',
+  patience = 10,
+  restore_best_weights = TRUE
+)
+
+# Train the model
+history <- model %>% fit(
+  x_train, y_train,
+  epochs = 100,
+  batch_size = 32,
+  validation_data = list(validation_x_scaled, validation_y),
+  callbacks = list(early_stopping)
+)
+
 
 ```
